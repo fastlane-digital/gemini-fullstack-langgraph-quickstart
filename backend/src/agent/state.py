@@ -21,6 +21,13 @@ class OverallState(TypedDict):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    manager_instruction: str
+    dtc_website_manager_output: str
+    ui_designer_output: str
+    copywriter_output: str
+    developer_output: str
+    asset_creator_output: str
+    next_agent_to_call: str
 
 
 class ReflectionState(TypedDict):

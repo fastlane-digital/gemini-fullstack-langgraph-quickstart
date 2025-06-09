@@ -1,8 +1,9 @@
 import os
+import json # Added import
 
 from agent.tools_and_schemas import SearchQueryList, Reflection
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage # BaseMessage was already there
 from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
@@ -22,11 +23,17 @@ from agent.prompts import (
     web_searcher_instructions,
     reflection_instructions,
     answer_instructions,
+    manager_agent_prompt, # Added import
+    dtc_website_manager_prompt, # Added import
+    ui_designer_prompt, # Added import
+    copywriter_prompt, # Added import
+    developer_prompt, # Added import
+    asset_creator_prompt # Added import
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
     get_citations,
-    get_research_topic,
+    get_research_topic, # Already imported, will use for manager_agent_node
     insert_citation_markers,
     resolve_urls,
 )
@@ -264,30 +271,238 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         "sources_gathered": unique_sources,
     }
 
+# --- New Agent Nodes Start ---
+
+def manager_agent_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model, # Using query_generator_model for now
+        temperature=0.7, # May need adjustment
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    user_request = get_research_topic(state["messages"])
+    if not user_request: # Default if no user request found
+        user_request = "Develop a new website."
+
+    # Combine the static system prompt with the dynamic user request for the LLM
+    prompt_input = manager_agent_prompt + f"\n\nHere is the user's specific goal:\n{user_request}"
+
+    response = llm.invoke(prompt_input)
+
+    try:
+        # Assuming response.content is a JSON string
+        parsed_response = json.loads(response.content)
+    except json.JSONDecodeError as e:
+        error_message = f"Error: Manager agent output was not valid JSON. Content: {response.content}. Error: {e}"
+        # Update state to reflect error and stop further processing by this path
+        return {
+            "next_agent_to_call": "ERROR", # Signal error
+            "manager_instruction": "Failed to parse manager agent output.",
+            # Add an AIMessage to log the error in the message history
+            "messages": state.get("messages", []) + [AIMessage(content=error_message)]
+        }
+
+    # Add manager's output as an AIMessage for history/logging
+    manager_ai_message = AIMessage(content=f"Manager decision: Next agent is {parsed_response.get('next_agent_to_call')}. Instruction: {parsed_response.get('manager_instruction')}")
+
+    return {
+        "next_agent_to_call": parsed_response.get("next_agent_to_call"),
+        "manager_instruction": parsed_response.get("manager_instruction"),
+        "messages": state.get("messages", []) + [manager_ai_message]
+    }
+
+def dtc_website_manager_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.7,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    formatted_prompt = dtc_website_manager_prompt.format(
+        manager_instruction=state.get("manager_instruction", "No instruction provided.")
+    )
+    response = llm.invoke(formatted_prompt)
+
+    return {
+        "dtc_website_manager_output": response.content,
+        "messages": state.get("messages", []) + [AIMessage(content=f"DtC Website Manager Output: {response.content}")]
+    }
+
+def ui_designer_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.7,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    formatted_prompt = ui_designer_prompt.format(
+        manager_instruction=state.get("manager_instruction", "No instruction provided."),
+        dtc_website_manager_output=state.get("dtc_website_manager_output", "No DtC output available.")
+    )
+    response = llm.invoke(formatted_prompt)
+
+    return {
+        "ui_designer_output": response.content,
+        "messages": state.get("messages", []) + [AIMessage(content=f"UI Designer Output: {response.content}")]
+    }
+
+def copywriter_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.7,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    formatted_prompt = copywriter_prompt.format(
+        manager_instruction=state.get("manager_instruction", "No instruction provided."),
+        dtc_website_manager_output=state.get("dtc_website_manager_output", "No DtC output available."),
+        ui_designer_output=state.get("ui_designer_output", "No UI design output available.")
+    )
+    response = llm.invoke(formatted_prompt)
+
+    return {
+        "copywriter_output": response.content,
+        "messages": state.get("messages", []) + [AIMessage(content=f"Copywriter Output: {response.content}")]
+    }
+
+def developer_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.7,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    formatted_prompt = developer_prompt.format(
+        manager_instruction=state.get("manager_instruction", "No instruction provided."),
+        dtc_website_manager_output=state.get("dtc_website_manager_output", "No DtC output available."),
+        ui_designer_output=state.get("ui_designer_output", "No UI design output available."),
+        copywriter_output=state.get("copywriter_output", "No copywriter output available.")
+    )
+    response = llm.invoke(formatted_prompt)
+
+    return {
+        "developer_output": response.content,
+        "messages": state.get("messages", []) + [AIMessage(content=f"Developer Output: {response.content}")]
+    }
+
+def asset_creator_node(state: OverallState, config: RunnableConfig) -> OverallState:
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.7,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+
+    formatted_prompt = asset_creator_prompt.format(
+        manager_instruction=state.get("manager_instruction", "No instruction provided."),
+        dtc_website_manager_output=state.get("dtc_website_manager_output", "No DtC output available."),
+        ui_designer_output=state.get("ui_designer_output", "No UI design output available."),
+        copywriter_output=state.get("copywriter_output", "No copywriter output available.")
+    )
+    response = llm.invoke(formatted_prompt)
+
+    return {
+        "asset_creator_output": response.content,
+        "messages": state.get("messages", []) + [AIMessage(content=f"Asset Creator Output: {response.content}")]
+    }
+
+# --- New Agent Nodes End ---
+
+# --- Manager Agent Routing Logic ---
+AGENT_TO_NODE_MAP = {
+    "DtCWebsiteManager": "dtc_website_manager",
+    "UIDesigner": "ui_designer",
+    "Copywriter": "copywriter",
+    "Developer": "developer",
+    "AssetCreator": "asset_creator",
+}
+
+def route_to_next_agent(state: OverallState) -> str:
+    """
+    Determines the next node to call based on the manager's decision.
+    Routes to END if the agent name is "END", "ERROR", or not recognized.
+    """
+    next_agent_name = state.get("next_agent_to_call")
+
+    if not next_agent_name or next_agent_name.upper() == "END" or next_agent_name.upper() == "ERROR":
+        if next_agent_name and next_agent_name.upper() == "ERROR":
+            # Optionally, log this event more formally if a logging system is in place
+            print(f"Manager agent indicated an error or unparsable output for state: {state.get('messages')[-2:]}. Ending graph.")
+        elif not next_agent_name:
+            print(f"No next_agent_to_call specified. Ending graph. State: {state.get('messages')[-2:]}")
+        return END
+
+    node_name = AGENT_TO_NODE_MAP.get(next_agent_name)
+
+    if node_name:
+        # print(f"Routing from manager to: {node_name}") # Debugging log
+        return node_name
+    else:
+        # Optionally, log this event
+        print(f"Error: Unrecognized agent name '{next_agent_name}' received from manager. Ending graph. State: {state.get('messages')[-2:]}")
+        return END
+# --- End Manager Agent Routing Logic ---
+
 
 # Create our Agent Graph
 builder = StateGraph(OverallState, config_schema=Configuration)
 
-# Define the nodes we will cycle between
+# --- Define Nodes for the main agent team workflow ---
+builder.add_node("manager_agent", manager_agent_node)
+builder.add_node("dtc_website_manager", dtc_website_manager_node)
+builder.add_node("ui_designer", ui_designer_node)
+builder.add_node("copywriter", copywriter_node)
+builder.add_node("developer", developer_node)
+builder.add_node("asset_creator", asset_creator_node)
+
+# --- Define Nodes for the (optional) research sub-flow ---
+# These nodes are part of a separate flow and are not directly connected to START
+# unless explicitly called by an agent (e.g., if a future tool/agent uses 'generate_query').
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
-# Set the entrypoint as `generate_query`
-# This means that this node is the first one called
-builder.add_edge(START, "generate_query")
-# Add conditional edge to continue with search queries in a parallel branch
+
+# --- Define Edges for the main agent team workflow ---
+
+# Set the entrypoint to the manager agent
+builder.add_edge(START, "manager_agent")
+
+# Conditional routing from the manager agent
+# This uses the AGENT_TO_NODE_MAP to create a dictionary of { "agent_node_name": "agent_node_name" }
+# and adds the END state to it.
+conditional_routes_map = {node_name: node_name for node_name in AGENT_TO_NODE_MAP.values()}
+conditional_routes_map[END] = END # Ensure END route is explicitly handled by the router function returning END
+
+builder.add_conditional_edges(
+    "manager_agent",  # Source node name matches the one in add_node
+    route_to_next_agent,
+    conditional_routes_map
+)
+
+# Edges from specialist agents back to the manager agent
+for node_name in AGENT_TO_NODE_MAP.values():
+    builder.add_edge(node_name, "manager_agent")
+
+
+# --- Edges for the (optional) research sub-flow ---
+# These define the connections for the research sub-graph.
+# This sub-graph is currently orphaned from the START node of the main flow.
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research"]
 )
-# Reflect on the web research
 builder.add_edge("web_research", "reflection")
-# Evaluate the research
 builder.add_conditional_edges(
     "reflection", evaluate_research, ["web_research", "finalize_answer"]
 )
-# Finalize the answer
-builder.add_edge("finalize_answer", END)
+builder.add_edge("finalize_answer", END) # This END is for the research flow specifically
 
-graph = builder.compile(name="pro-search-agent")
+
+# Compile the graph
+graph = builder.compile(name="multi-agent-team-workflow") # Renamed graph
