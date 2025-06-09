@@ -303,12 +303,20 @@ def manager_agent_node(state: OverallState, config: RunnableConfig) -> OverallSt
             "messages": state.get("messages", []) + [AIMessage(content=error_message)]
         }
 
-    # Add manager's output as an AIMessage for history/logging
-    manager_ai_message = AIMessage(content=f"Manager decision: Next agent is {parsed_response.get('next_agent_to_call')}. Instruction: {parsed_response.get('manager_instruction')}")
+    next_agent = parsed_response.get("next_agent_to_call")
+    instruction = parsed_response.get("manager_instruction")
+    manager_ai_message_content = ""
+
+    if next_agent == "USER_CLARIFICATION":
+        manager_ai_message_content = f"Manager: {instruction}"
+    else:
+        manager_ai_message_content = f"Manager decision: Next agent is {next_agent}. Instruction: {instruction}"
+
+    manager_ai_message = AIMessage(content=manager_ai_message_content)
 
     return {
-        "next_agent_to_call": parsed_response.get("next_agent_to_call"),
-        "manager_instruction": parsed_response.get("manager_instruction"),
+        "next_agent_to_call": next_agent,
+        "manager_instruction": instruction,
         "messages": state.get("messages", []) + [manager_ai_message]
     }
 
@@ -425,9 +433,16 @@ AGENT_TO_NODE_MAP = {
 def route_to_next_agent(state: OverallState) -> str:
     """
     Determines the next node to call based on the manager's decision.
-    Routes to END if the agent name is "END", "ERROR", or not recognized.
+    Routes to END if the agent name is "END", "ERROR", or not recognized, or "USER_CLARIFICATION".
     """
     next_agent_name = state.get("next_agent_to_call")
+
+    # If manager asks for clarification, the graph should wait for new user input.
+    # For now, we treat this as an effective end-point for the current automated run.
+    # The overall application orchestrator would handle obtaining user input and reinvoking.
+    if next_agent_name == "USER_CLARIFICATION":
+        print(f"Manager is requesting user clarification. Instruction: {state.get('manager_instruction')}")
+        return END # Or a special node if we want to handle this state differently within the graph. For now, END.
 
     if not next_agent_name or next_agent_name.upper() == "END" or next_agent_name.upper() == "ERROR":
         if next_agent_name and next_agent_name.upper() == "ERROR":
@@ -476,12 +491,13 @@ builder.add_edge(START, "manager_agent")
 
 # Conditional routing from the manager agent
 # This uses the AGENT_TO_NODE_MAP to create a dictionary of { "agent_node_name": "agent_node_name" }
-# and adds the END state to it.
+# and adds the END state to it. USER_CLARIFICATION also routes to END for the graph's internal flow.
 conditional_routes_map = {node_name: node_name for node_name in AGENT_TO_NODE_MAP.values()}
-conditional_routes_map[END] = END # Ensure END route is explicitly handled by the router function returning END
+conditional_routes_map[END] = END
+conditional_routes_map["USER_CLARIFICATION"] = END # Manager asking for clarification effectively ends this run.
 
 builder.add_conditional_edges(
-    "manager_agent",  # Source node name matches the one in add_node
+    "manager_agent",
     route_to_next_agent,
     conditional_routes_map
 )
